@@ -77,7 +77,9 @@ def edit_edge_index(edge_index, u, v, is_deletion):
 
 def make_differentiable_adj(edge_index, num_nodes):
     """Create a dense float adjacency matrix with requires_grad=True."""
-    adj = torch.zeros(num_nodes, num_nodes, dtype=torch.float32)
-    adj[edge_index[0], edge_index[1]] = 1.0
+    device = edge_index.device
+    adj = torch.zeros(num_nodes, num_nodes, dtype=torch.float32, device=device)
+    ei_cpu = edge_index.cpu()
+    adj[ei_cpu[0], ei_cpu[1]] = 1.0
     adj = adj.requires_grad_(True)
     return adj

@@ -37,10 +37,11 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 
 ## Current Status
 
-- validation_loss correlation: **r = 0.9809** (20 edges)
-- over_squashing correlation: **r = 0.8711** (20 edges)
-- dirichlet_energy correlation: **r = 0.1120** (20 edges) — still low, needs investigation
+- validation_loss correlation: **r = 0.374** (200 edges, damping=0.01) — needs damping tuning
+- over_squashing correlation: **r = 0.914** (200 edges, damping=0.1)
+- dirichlet_energy correlation: **r = 0.947** (200 edges, damping=0.1)
 - Dense/sparse forward max diff: **5.72e-06** (well within 1e-3 tolerance)
+- Per-metric damping implemented (paper tunes λ from {0.1, 0.01, 0.001, 0.0001})
 
 ## Resolved Issues
 
@@ -54,21 +55,21 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 8. ~~**`metrics.py` — `over_squashing` neighbor masking inconsistency**~~: Freeze baseline L-hop neighbors and pass explicitly via `L_hop_neighbors` kwarg.
 9. ~~**`influence.py` — `ggn_vector_product` VJP path**~~: Now uses `functional_call` instead of `model(...)` for consistency.
 10. ~~**`metrics.py` — `over_squashing` scaling for skipped nodes**~~: Track `included_count` and scale by `num_nodes / included_count`.
+11. ~~**`dirichlet_energy` correlation low (r=0.11)**~~: Root cause was GGN near-singular with low damping, inflating IHVP and param_shift. Fixed with per-metric damping (DE λ=0.1 → r=0.947).
+12. ~~**Dense DE O(N²C) allocation**~~: Replaced `logits.unsqueeze(0) - logits.unsqueeze(1)` with `||h_i||² + ||h_j||² - 2h_i^Th_j` identity.
+13. ~~**VJP autograd.grad target mismatch**~~: Fixed to differentiate w.r.t. `param_dict.values()` instead of `params`.
+14. ~~**train_model optimizer scope**~~: Changed to `model.sparse_params()` since dense params are overwritten by sync.
 
 ## Remaining Issues
 
 ### Critical
-1. **`dirichlet_energy` correlation still low (r = 0.11)**: Root cause (confirmed by GPT-5.2 review): PBRF retrains on cross-entropy to find `theta*`, but actual influence evaluates Dirichlet energy at `theta*`. The parameter shift component reflects how `theta` changes to minimize CE, not how DE changes. **Potential fix**: Decompose actual influence into structure-only (`f(theta_s, G_edited) - f(theta_s, G)`) vs parameter-update (`f(theta*, G_edited) - f(theta_s, G_edited)`) to isolate where correlation breaks.
+1. **`validation_loss` correlation low at 200 edges (r = 0.374)**: Root cause: over-trained model (100% train acc) makes GGN eigenvalues near-zero, amplifying param_shift outliers via the first-order approximation. A few edges near training nodes produce param_shift values ~100x larger than actual parameter_update. **Fix needed**: tune VL damping — `tune_vl_damping.py` sweeps {0.001, 0.01, 0.05, 0.1, 0.5, 1.0}.
 
-### High
-2. **Dense Dirichlet energy O(N^2*C) allocation** (`metrics.py:108-110`): `logits.unsqueeze(0) - logits.unsqueeze(1)` creates (N,N,C) tensor. Use `||h_i||^2 + ||h_j||^2 - 2h_i^Th_j` identity to avoid.
-3. **VJP `autograd.grad` target mismatch** (`influence.py:55-66`): Should differentiate w.r.t. `param_dict.values()` not `params` for full consistency with `functional_call`.
-
-### Medium
-4. **`train_model` optimizes all params** (`models.py:83`): Should use `model.sparse_params()` since dense params are overwritten by `_sync_dense_from_sparse` every step.
-
-### Config
-- NUM_EDGES currently set to 20 for fast iteration; increase to 200 for final run
+### Resolved (this session)
+- ~~DE correlation low (r=0.11)~~: Fixed via per-metric damping (DE λ=0.1 → r=0.947)
+- ~~Dense DE O(N²C) allocation~~: Fixed with `||h_i||² + ||h_j||² - 2h_i^Th_j` identity
+- ~~VJP autograd.grad target mismatch~~: Fixed to use `param_dict.values()`
+- ~~train_model optimizes all params~~: Fixed to use `model.sparse_params()`
 
 ## Task List
 - [x] Fix #1: Replace finite-diff JVP with `torch.func.jvp` in `ggn_vector_product`
@@ -82,6 +83,14 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 - [x] Fix `dirichlet_energy` dense/sparse definition alignment (fixed count in both paths, fixed dense denominator to use `edge_count`)
 - [x] Fix `ggn_vector_product` VJP to reuse `functional_call` output
 - [x] Fix `over_squashing` scaling to account for skipped nodes (track `included_count`)
-- [ ] Investigate dirichlet_energy low correlation (r = 0.11)
-- [ ] Verify correlation reaches 0.85+ on 200 edges x 3 metrics
+- [x] Investigate dirichlet_energy low correlation (r = 0.11 → r = 0.947 with damping=0.1)
+- [x] Implement per-metric damping (VL=0.01, OQ=0.1, DE=0.1)
+- [x] Fix dense DE O(N²C) allocation (use quadratic expansion identity)
+- [x] Fix VJP autograd.grad target (use `param_dict.values()`)
+- [x] Fix train_model optimizer scope (use `model.sparse_params()`)
+- [ ] Tune VL damping (current r=0.374 at damping=0.01, sweep {0.001..1.0})
+- [ ] Verify all 3 correlations ≥ 0.85 on 200 edges
+- [ ] Remove `_sync_dense_from_sparse()` from `forward_dense()`, sync explicitly at call sites (`models.py:54`)
+- [ ] Replace identity-based param selection with name-based matching in `ggn_vector_product` (`influence.py:37`)
+- [ ] Add NaN/negative-denominator guard in CG solver (`influence.py:107`)
 - [x] Full run: `uv run main.py` produces `figure2.png`

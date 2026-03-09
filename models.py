@@ -55,7 +55,9 @@ class VanillaGCN(nn.Module):
         adj_hat = adj + torch.eye(adj.size(0), device=adj.device, dtype=adj.dtype)
         deg = adj_hat.sum(dim=1)
         deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0
+        deg_inv_sqrt = torch.where(
+            deg == 0, torch.zeros_like(deg_inv_sqrt), deg_inv_sqrt
+        )
         norm = deg_inv_sqrt.unsqueeze(1) * adj_hat * deg_inv_sqrt.unsqueeze(0)
 
         for i, lin in enumerate(self.lins[:-1]):
@@ -81,7 +83,7 @@ class VanillaGCN(nn.Module):
 def train_model(model, data, lr=0.01, weight_decay=1e-5, epochs=2000, verbose=True):
     """Train a GCN model on graph data using SGD."""
     optimizer = torch.optim.SGD(
-        model.parameters(), lr=lr, weight_decay=weight_decay
+        model.sparse_params(), lr=lr, weight_decay=weight_decay
     )
 
     model.train()

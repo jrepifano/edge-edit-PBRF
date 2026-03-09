@@ -133,6 +133,11 @@ def compute_actual_influence(model_orig, model_retrained, data, edge_index_edite
     """Compute actual influence: f(theta*, G_edited) - f(theta_s, G).
 
     theta* = retrained params, theta_s = original params.
+
+    Returns (total, structure_only, parameter_update) where:
+    - structure_only = f(theta_s, G_edited) - f(theta_s, G)
+    - parameter_update = f(theta*, G_edited) - f(theta_s, G_edited)
+    - total = structure_only + parameter_update
     """
     if metric_kwargs is None:
         metric_kwargs = {}
@@ -142,8 +147,16 @@ def compute_actual_influence(model_orig, model_retrained, data, edge_index_edite
         kwargs_orig["edge_index"] = data.edge_index
         f_orig = metric_fn(model_orig, data, **kwargs_orig).item()
 
+        kwargs_edited_orig = dict(metric_kwargs)
+        kwargs_edited_orig["edge_index"] = edge_index_edited
+        f_edited_orig_model = metric_fn(model_orig, data, **kwargs_edited_orig).item()
+
         kwargs_edited = dict(metric_kwargs)
         kwargs_edited["edge_index"] = edge_index_edited
         f_edited = metric_fn(model_retrained, data, **kwargs_edited).item()
 
-    return f_edited - f_orig
+    structure_only = f_edited_orig_model - f_orig
+    parameter_update = f_edited - f_edited_orig_model
+    total = f_edited - f_orig
+
+    return total, structure_only, parameter_update

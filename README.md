@@ -36,8 +36,11 @@ Actual influence is computed by PBRF fine-tuning (Eq. 9) and evaluating metric d
 
 Key hyperparameters in `main.py`:
 - `HIDDEN_DIM=64`, `NUM_LAYERS=4`, `LR=0.1`, `WEIGHT_DECAY=1e-4`
-- `DAMPING=0.01`, `CG_ITER=200`
-- `NUM_EDGES=200` (per type), `PBRF_LR=0.01`, `PBRF_STEPS=1000`
+- `CG_ITER=200`, `NUM_EDGES=200` (per type), `PBRF_LR=0.01`, `PBRF_STEPS=1000`
+- Per-metric damping (paper tunes λ from {0.1, 0.01, 0.001, 0.0001}):
+  - validation_loss: λ=0.01
+  - over_squashing: λ=0.1
+  - dirichlet_energy: λ=0.1
 
 ## Status
 
@@ -46,7 +49,7 @@ Key hyperparameters in `main.py`:
 - GGN-vector product: exact JVP via `torch.func.jvp` + `functional_call`
 - CG solver, grad_A, PBRF retraining: implemented and working
 - End-to-end pipeline: functional, produces `figure2.png`
-- **validation_loss: r = 0.9809** (20 edges)
-- **over_squashing: r = 0.8711** (20 edges)
-- dirichlet_energy: r = 0.1120 (20 edges) — still under investigation
+- validation_loss: r = 0.374 (200 edges) — VL damping needs tuning
+- **over_squashing: r = 0.914** (200 edges)
+- **dirichlet_energy: r = 0.947** (200 edges)
 - Target: correlations 0.85+ across all 3 metrics

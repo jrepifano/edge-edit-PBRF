@@ -105,8 +105,11 @@ def dirichlet_energy(model, data, edge_index=None, adj=None, edge_count=None):
     if adj is not None:
         logits = model.forward_dense(data.x, adj)
         # Fully differentiable w.r.t. adj: E = sum_ij A_ij * ||h_i - h_j||^2 / count
-        diff = logits.unsqueeze(0) - logits.unsqueeze(1)  # (N, N, C)
-        sq_diff = (diff * diff).sum(dim=2)  # (N, N)
+        # Use identity ||h_i-h_j||^2 = ||h_i||^2 + ||h_j||^2 - 2*h_i^T*h_j
+        # to avoid O(N^2*C) intermediate tensor
+        sq_norms = (logits * logits).sum(dim=1)  # (N,)
+        cross = logits @ logits.t()  # (N, N)
+        sq_diff = sq_norms.unsqueeze(1) + sq_norms.unsqueeze(0) - 2 * cross  # (N, N)
         # Use fixed edge_count to avoid spurious gradient through denominator
         divisor = edge_count if edge_count is not None else (adj.sum() + 1e-10)
         energy = (adj * sq_diff).sum() / divisor

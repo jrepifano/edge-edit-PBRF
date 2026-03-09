@@ -30,9 +30,9 @@ NUM_LAYERS = 4
 LR = 0.1
 WEIGHT_DECAY = 1e-4
 TRAIN_EPOCHS = 2000
-DAMPING = 0.01
+DAMPING = 0.1
 CG_ITER = 200
-NUM_EDGES = 20  # per type (deletion/insertion) — use 200 for final run
+NUM_EDGES = 200  # per type (deletion/insertion)
 SEED = 42
 PBRF_LR = 0.01
 PBRF_STEPS = 1000
@@ -57,10 +57,14 @@ def verify_dense_forward(model, data):
 
 
 def process_edges(model, data, edges, is_deletion, metric_fn, metric_kwargs,
-                  ihvp, grad_A, label):
+                  ihvp, grad_A, label, damping=None):
     """Process a list of edges (deletion or insertion), returning pred/actual lists."""
     predicted_list = []
     actual_list = []
+    structure_only_list = []
+    parameter_update_list = []
+    param_shift_list = []
+    msg_prop_list = []
     total = len(edges)
     t0 = time.time()
 
@@ -75,17 +79,22 @@ def process_edges(model, data, edges, is_deletion, metric_fn, metric_kwargs,
 
         # Actual influence via PBRF
         edge_index_edited = edit_edge_index(data.edge_index, u, v, is_deletion=is_deletion)
+        pbrf_damping = damping if damping is not None else DAMPING
         model_retrained = retrain_for_actual_influence(
             model, data, edge_index_edited,
-            damping=DAMPING, lr=PBRF_LR, max_steps=PBRF_STEPS,
+            damping=pbrf_damping, lr=PBRF_LR, max_steps=PBRF_STEPS,
         )
-        actual = compute_actual_influence(
+        actual, struct_only, param_upd = compute_actual_influence(
             model, model_retrained, data, edge_index_edited, metric_fn,
             metric_kwargs=metric_kwargs,
         )
 
         predicted_list.append(pred)
         actual_list.append(actual)
+        structure_only_list.append(struct_only)
+        parameter_update_list.append(param_upd)
+        param_shift_list.append(ps)
+        msg_prop_list.append(mp)
 
         elapsed = time.time() - edge_t0
         total_elapsed = time.time() - t0
@@ -94,18 +103,27 @@ def process_edges(model, data, edges, is_deletion, metric_fn, metric_kwargs,
         print(f"  [{label} {i+1}/{total}] edge=({u},{v}) "
               f"pred={pred:.4e} actual={actual:.4e} "
               f"(ps={ps:.4e} mp={mp:.4e}) "
+              f"struct_only={struct_only:.4e} param_upd={param_upd:.4e} "
               f"[{elapsed:.1f}s, ETA {eta:.0f}s]", flush=True)
 
     print(f"  {label} done in {time.time() - t0:.1f}s")
-    return predicted_list, actual_list
+    return {
+        "predicted": predicted_list,
+        "actual": actual_list,
+        "structure_only": structure_only_list,
+        "parameter_update": parameter_update_list,
+        "param_shift": param_shift_list,
+        "msg_prop": msg_prop_list,
+    }
 
 
 def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
-               deletion_edges, insertion_edges):
+               deletion_edges, insertion_edges, damping=None):
     """Run influence estimation and actual influence for one metric."""
+    metric_damping = damping if damping is not None else DAMPING
     metric_t0 = time.time()
     print(f"\n{'='*60}")
-    print(f"Processing metric: {metric_name}")
+    print(f"Processing metric: {metric_name} (damping={metric_damping})")
     print(f"{'='*60}")
 
     # Step 1: Compute IHVP (once per metric)
@@ -113,7 +131,7 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
     t0 = time.time()
     ihvp = compute_ihvp(
         model, data, metric_fn, metric_kwargs=metric_kwargs,
-        damping=DAMPING, cg_iter=CG_ITER, verbose=True,
+        damping=metric_damping, cg_iter=CG_ITER, verbose=True,
     )
     print(f"IHVP computed in {time.time() - t0:.1f}s")
 
@@ -125,24 +143,58 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
     print(f"grad_A computed in {time.time() - t0:.1f}s")
 
     # Step 3: Process edges
-    del_pred, del_actual = process_edges(
+    del_results = process_edges(
         model, data, deletion_edges, is_deletion=True,
         metric_fn=metric_fn, metric_kwargs=metric_kwargs,
         ihvp=ihvp, grad_A=grad_A, label="deletion",
+        damping=metric_damping,
     )
-    ins_pred, ins_actual = process_edges(
+    ins_results = process_edges(
         model, data, insertion_edges, is_deletion=False,
         metric_fn=metric_fn, metric_kwargs=metric_kwargs,
         ihvp=ihvp, grad_A=grad_A, label="insertion",
+        damping=metric_damping,
     )
+
+    # Merge results
+    merged = {}
+    for key in del_results:
+        merged[key] = del_results[key] + ins_results[key]
+    merged["is_deletion"] = (
+        [True] * len(del_results["predicted"])
+        + [False] * len(ins_results["predicted"])
+    )
+
+    # Print sub-component correlations for diagnostics
+    from scipy.stats import pearsonr
+    import numpy as np
+
+    n = len(merged["predicted"])
+    if n > 2:
+        mp = np.array(merged["msg_prop"])
+        ps = np.array(merged["param_shift"])
+        so = np.array(merged["structure_only"])
+        pu = np.array(merged["parameter_update"])
+        pred = np.array(merged["predicted"])
+        actual = np.array(merged["actual"])
+
+        print(f"\n--- {metric_name} Diagnostic Correlations ---")
+        r_mp_so, _ = pearsonr(mp, so)
+        r_ps_pu, _ = pearsonr(ps, pu)
+        r_total, _ = pearsonr(pred, actual)
+        print(f"  msg_prop vs structure_only:   r = {r_mp_so:.4f}")
+        print(f"  param_shift vs param_update:  r = {r_ps_pu:.4f}")
+        print(f"  predicted vs actual (total):  r = {r_total:.4f}")
+
+        # Print magnitude stats
+        print(f"  |msg_prop| mean={np.abs(mp).mean():.4e} std={np.abs(mp).std():.4e}")
+        print(f"  |param_shift| mean={np.abs(ps).mean():.4e} std={np.abs(ps).std():.4e}")
+        print(f"  |structure_only| mean={np.abs(so).mean():.4e} std={np.abs(so).std():.4e}")
+        print(f"  |parameter_update| mean={np.abs(pu).mean():.4e} std={np.abs(pu).std():.4e}")
 
     print(f"\nMetric '{metric_name}' total time: {time.time() - metric_t0:.1f}s")
 
-    return {
-        "predicted": del_pred + ins_pred,
-        "actual": del_actual + ins_actual,
-        "is_deletion": [True] * len(del_pred) + [False] * len(ins_pred),
-    }
+    return merged
 
 
 def main():
@@ -186,18 +238,22 @@ def main():
     print(f"Precomputed L-hop neighbors for {len(baseline_L_hop)} nodes")
 
     # --- Define metrics ---
+    # Per-metric damping (paper tunes λ from {0.1, 0.01, 0.001, 0.0001})
     metrics = {
         "validation_loss": {
             "fn": validation_loss,
             "kwargs": {},
+            "damping": 0.01,
         },
         "over_squashing": {
             "fn": over_squashing,
             "kwargs": {"num_layers": NUM_LAYERS, "L_hop_neighbors": baseline_L_hop},
+            "damping": 0.1,
         },
         "dirichlet_energy": {
             "fn": dirichlet_energy,
             "kwargs": {"edge_count": data.edge_index.shape[1]},
+            "damping": 0.1,
         },
     }
 
@@ -210,6 +266,7 @@ def main():
             model, data, metric_name,
             metric_config["fn"], metric_config["kwargs"],
             deletion_edges, insertion_edges,
+            damping=metric_config["damping"],
         )
 
         # Print running correlation after each metric

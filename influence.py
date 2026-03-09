@@ -56,13 +56,14 @@ def ggn_vector_product(model, data, v_flat, damping=0.01):
     grad_output = torch.zeros_like(logits_for_grad)
     grad_output[train_idx] = HJv.detach()
 
+    vjp_targets = list(param_dict.values())
     grads = torch.autograd.grad(
-        logits_for_grad, params, grad_outputs=grad_output,
+        logits_for_grad, vjp_targets, grad_outputs=grad_output,
         retain_graph=False, allow_unused=True
     )
     result = torch.cat([
         (g if g is not None else torch.zeros_like(p_)).flatten()
-        for g, p_ in zip(grads, params)
+        for g, p_ in zip(grads, vjp_targets)
     ])
 
     # Average over training set and add damping
