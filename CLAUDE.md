@@ -49,10 +49,18 @@ over_squashing and dirichlet_energy correlations still low — need further inve
 5. ~~**`main.py` — PBRF hyperparams**~~: Tuned to `PBRF_LR=0.01`, `PBRF_STEPS=1000`.
 6. ~~**`models.py` — `_sync_dense_from_sparse()` breaks autograd**~~: Wrapped in `torch.no_grad()`.
 
-## Remaining Issues
+## Remaining Issues (from GPT-5.2 code review)
 
-- over_squashing correlation near zero — may need different approach for this metric
-- dirichlet_energy correlation near zero — investigate grad_A or actual influence computation
+### Critical
+1. **`forward_dense` does not exactly match `GCNConv`**: Tolerance is 0.05 (should be <1e-3). Mismatch corrupts `df/dA` gradients for both dirichlet_energy and over_squashing. **Fix**: Align dense normalization with PyG's `gcn_norm` exactly, then tighten `verify_dense_forward` tolerance.
+2. **`over_squashing` neighbor masking is not differentiable w.r.t. `adj`**: `compute_L_hop_neighbors` uses discrete BFS on `edge_index`, so `df/dA` only captures gradient through `forward_dense`, not through neighborhood selection. **Fix**: Freeze neighbor structure from baseline graph and pass it explicitly so predicted and actual influence use consistent definitions.
+3. **`dirichlet_energy` dense vs sparse formulations may diverge**: Dense uses `(adj * sq_diff).sum() / adj.sum()`, sparse uses `mean over edge_index`. These match only if `make_differentiable_adj` produces adjacency with same directionality/multiplicity as `edge_index`. **Fix**: Verify equivalence or align definitions explicitly.
+
+### Medium
+4. **`ggn_vector_product` VJP recomputes logits**: Step 3 calls `model(data.x, data.edge_index)` separately instead of reusing `functional_call` output from Step 1. Could desync if model has stateful behavior. **Fix**: Use `functional_call` for the VJP path too.
+5. **`over_squashing` scaling doesn't account for skipped nodes**: Scale factor assumes all `sample_nodes` are used, but nodes with small neighborhoods are skipped. **Fix**: Track count of included nodes and scale by `num_nodes / count`.
+
+### Config
 - NUM_EDGES currently set to 20 for fast iteration; increase to 200 for final run
 
 ## Task List
@@ -62,7 +70,10 @@ over_squashing and dirichlet_energy correlations still low — need further inve
 - [x] Fix #4: Fix `dirichlet_energy` edge set in dense mode
 - [x] Fix #5: Tune PBRF hyperparameters
 - [x] Fix #6: Wrap `_sync_dense_from_sparse` in `torch.no_grad()`
-- [ ] Fix over_squashing correlation
-- [ ] Fix dirichlet_energy correlation
+- [ ] Fix `forward_dense` to match `GCNConv` exactly, tighten tolerance to <1e-3
+- [ ] Fix `over_squashing` neighbor masking consistency (freeze from baseline graph)
+- [ ] Fix `dirichlet_energy` dense/sparse definition alignment
+- [ ] Fix `ggn_vector_product` VJP to reuse `functional_call` output
+- [ ] Fix `over_squashing` scaling to account for skipped nodes
 - [ ] Verify correlation reaches 0.85+ on 200 edges x 3 metrics
 - [x] Full run: `uv run main.py` produces `figure2.png`
