@@ -41,7 +41,7 @@ def compute_L_hop_neighbors(edge_index, num_nodes, L):
 
 
 def over_squashing(model, data, num_layers, edge_index=None, adj=None,
-                   sample_nodes=100, seed=42):
+                   sample_nodes=100, seed=42, L_hop_neighbors=None):
     """Over-squashing metric (Eq. 14).
 
     f_OQ = (N/S) * sum_{v in sample} ||h_v^G - h_v^{G'(v)}||_2
@@ -55,8 +55,11 @@ def over_squashing(model, data, num_layers, edge_index=None, adj=None,
         ei = edge_index if edge_index is not None else data.edge_index
         logits_orig = model(data.x, ei)
 
-    ei_for_neighbors = edge_index if edge_index is not None else data.edge_index
-    L_hop = compute_L_hop_neighbors(ei_for_neighbors, data.num_nodes, num_layers)
+    if L_hop_neighbors is not None:
+        L_hop = L_hop_neighbors
+    else:
+        ei_for_neighbors = edge_index if edge_index is not None else data.edge_index
+        L_hop = compute_L_hop_neighbors(ei_for_neighbors, data.num_nodes, num_layers)
 
     num_nodes = data.num_nodes
 
@@ -64,49 +67,54 @@ def over_squashing(model, data, num_layers, edge_index=None, adj=None,
     if sample_nodes is not None and sample_nodes < num_nodes:
         gen = torch.Generator().manual_seed(seed)
         node_indices = torch.randperm(num_nodes, generator=gen)[:sample_nodes].tolist()
-        scale = num_nodes / sample_nodes
     else:
         node_indices = list(range(num_nodes))
-        scale = 1.0
 
     total = torch.tensor(0.0, device=logits_orig.device)
+    included_count = 0
+
+    ei_for_forward = edge_index if edge_index is not None else data.edge_index
 
     for v in node_indices:
         neighbor_set = L_hop[v]
         if len(neighbor_set) <= 1:
             continue
-        x_modified = data.x.clone()
         neighbor_indices = [n for n in neighbor_set if n != v]
         if len(neighbor_indices) == 0:
             continue
+        included_count += 1
+        x_modified = data.x.clone()
         x_modified[neighbor_indices] = 0.0
 
         if adj is not None:
             logits_mod = model.forward_dense(x_modified, adj)
         else:
-            logits_mod = model(x_modified, ei_for_neighbors)
+            logits_mod = model(x_modified, ei_for_forward)
 
         diff = logits_orig[v] - logits_mod[v]
         total = total + torch.norm(diff, p=2)
 
-    return total * scale
+    return total * (num_nodes / max(included_count, 1))
 
 
-def dirichlet_energy(model, data, edge_index=None, adj=None):
+def dirichlet_energy(model, data, edge_index=None, adj=None, edge_count=None):
     """Dirichlet energy: mean ||h_u - h_v||^2 over edges.
 
     Measures over-smoothing — lower values mean more over-smoothing.
     """
     if adj is not None:
         logits = model.forward_dense(data.x, adj)
-        # Fully differentiable w.r.t. adj: E = sum_ij A_ij * ||h_i - h_j||^2 / sum_ij A_ij
+        # Fully differentiable w.r.t. adj: E = sum_ij A_ij * ||h_i - h_j||^2 / count
         diff = logits.unsqueeze(0) - logits.unsqueeze(1)  # (N, N, C)
         sq_diff = (diff * diff).sum(dim=2)  # (N, N)
-        energy = (adj * sq_diff).sum() / (adj.sum() + 1e-10)
+        # Use fixed edge_count to avoid spurious gradient through denominator
+        divisor = edge_count if edge_count is not None else (adj.sum() + 1e-10)
+        energy = (adj * sq_diff).sum() / divisor
     else:
         ei = edge_index if edge_index is not None else data.edge_index
         logits = model(data.x, ei)
         src, dst = ei[0], ei[1]
         diff = logits[src] - logits[dst]
-        energy = (diff * diff).sum(dim=1).mean()
+        count = edge_count if edge_count is not None else ei.shape[1]
+        energy = (diff * diff).sum(dim=1).sum() / count
     return energy

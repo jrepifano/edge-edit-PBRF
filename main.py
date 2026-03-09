@@ -15,7 +15,7 @@ from data import (
     edit_edge_index,
 )
 from models import VanillaGCN, train_model
-from metrics import validation_loss, over_squashing, dirichlet_energy
+from metrics import validation_loss, over_squashing, dirichlet_energy, compute_L_hop_neighbors
 from influence import (
     compute_ihvp,
     compute_grad_A,
@@ -52,7 +52,7 @@ def verify_dense_forward(model, data):
         out_dense = model.forward_dense(data.x, adj)
     diff = (out_sparse - out_dense).abs().max().item()
     print(f"Dense vs Sparse forward max diff: {diff:.2e}")
-    assert diff < 0.05, f"Dense forward mismatch: {diff}"
+    assert diff < 1e-3, f"Dense forward mismatch: {diff}"
     print("Dense forward verification PASSED")
 
 
@@ -148,7 +148,7 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
 def main():
     torch.manual_seed(SEED)
     torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision("highest")
     print(f"Device: {DEVICE}")
     print(f"Config: NUM_EDGES={NUM_EDGES}, PBRF_LR={PBRF_LR}, PBRF_STEPS={PBRF_STEPS}, "
           f"DAMPING={DAMPING}, CG_ITER={CG_ITER}")
@@ -180,6 +180,11 @@ def main():
     insertion_edges = sample_edges_for_insertion(data, NUM_EDGES, seed=SEED)
     print(f"Sampled {len(deletion_edges)} deletion edges, {len(insertion_edges)} insertion edges")
 
+    # --- Precompute baseline L-hop neighbors (frozen from baseline graph) ---
+    print("\n--- Precomputing baseline L-hop neighbors ---")
+    baseline_L_hop = compute_L_hop_neighbors(data.edge_index, data.num_nodes, NUM_LAYERS)
+    print(f"Precomputed L-hop neighbors for {len(baseline_L_hop)} nodes")
+
     # --- Define metrics ---
     metrics = {
         "validation_loss": {
@@ -188,11 +193,11 @@ def main():
         },
         "over_squashing": {
             "fn": over_squashing,
-            "kwargs": {"num_layers": NUM_LAYERS},
+            "kwargs": {"num_layers": NUM_LAYERS, "L_hop_neighbors": baseline_L_hop},
         },
         "dirichlet_energy": {
             "fn": dirichlet_energy,
-            "kwargs": {},
+            "kwargs": {"edge_count": data.edge_index.shape[1]},
         },
     }
 

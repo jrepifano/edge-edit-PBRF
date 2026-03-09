@@ -42,10 +42,11 @@ Key hyperparameters in `main.py`:
 ## Status
 
 - Model training: working (val acc ~79%)
-- Dense/sparse forward equivalence: verified
+- Dense/sparse forward equivalence: verified (max diff 5.72e-06)
 - GGN-vector product: exact JVP via `torch.func.jvp` + `functional_call`
 - CG solver, grad_A, PBRF retraining: implemented and working
 - End-to-end pipeline: functional, produces `figure2.png`
-- **validation_loss: r = 0.9452** (20 edges)
-- over_squashing, dirichlet_energy: correlation tuning in progress
+- **validation_loss: r = 0.9809** (20 edges)
+- **over_squashing: r = 0.8711** (20 edges)
+- dirichlet_energy: r = 0.1120 (20 edges) — still under investigation
 - Target: correlations 0.85+ across all 3 metrics

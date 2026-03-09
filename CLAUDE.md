@@ -37,28 +37,35 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 
 ## Current Status
 
-validation_loss correlation: **r = 0.9452** (20 edges, target 0.85+)
-over_squashing and dirichlet_energy correlations still low — need further investigation.
+- validation_loss correlation: **r = 0.9809** (20 edges)
+- over_squashing correlation: **r = 0.8711** (20 edges)
+- dirichlet_energy correlation: **r = 0.1120** (20 edges) — still low, needs investigation
+- Dense/sparse forward max diff: **5.72e-06** (well within 1e-3 tolerance)
 
 ## Resolved Issues
 
 1. ~~**`influence.py` — Finite-diff JVP breaks CG**~~: Replaced with exact `torch.func.jvp` + `functional_call`.
 2. ~~**`retrain.py` — PBRF double-penalizes parameters**~~: Restricted optimizer + proximal to `sparse_params()` only.
 3. ~~**`metrics.py` — `over_squashing` infeasible for `grad_A`**~~: Samples 100 nodes instead of all 2708 (27x speedup), grad_A now enabled.
-4. ~~**`metrics.py` — `dirichlet_energy` uses wrong edges in dense mode**~~: Dense mode now uses fully differentiable `(adj * sq_diff).sum() / adj.sum()` formulation.
+4. ~~**`metrics.py` — `dirichlet_energy` uses wrong edges in dense mode**~~: Dense mode now uses fully differentiable formulation with fixed `edge_count` denominator.
 5. ~~**`main.py` — PBRF hyperparams**~~: Tuned to `PBRF_LR=0.01`, `PBRF_STEPS=1000`.
 6. ~~**`models.py` — `_sync_dense_from_sparse()` breaks autograd**~~: Wrapped in `torch.no_grad()`.
+7. ~~**`models.py` — `forward_dense` wrong operation order**~~: Fixed to match GCNConv: `lin(x)` → `norm @ x` → `+ bias` (was `norm @ x` → `lin(x)`). Also set matmul precision to "highest".
+8. ~~**`metrics.py` — `over_squashing` neighbor masking inconsistency**~~: Freeze baseline L-hop neighbors and pass explicitly via `L_hop_neighbors` kwarg.
+9. ~~**`influence.py` — `ggn_vector_product` VJP path**~~: Now uses `functional_call` instead of `model(...)` for consistency.
+10. ~~**`metrics.py` — `over_squashing` scaling for skipped nodes**~~: Track `included_count` and scale by `num_nodes / included_count`.
 
-## Remaining Issues (from GPT-5.2 code review)
+## Remaining Issues
 
 ### Critical
-1. **`forward_dense` does not exactly match `GCNConv`**: Tolerance is 0.05 (should be <1e-3). Mismatch corrupts `df/dA` gradients for both dirichlet_energy and over_squashing. **Fix**: Align dense normalization with PyG's `gcn_norm` exactly, then tighten `verify_dense_forward` tolerance.
-2. **`over_squashing` neighbor masking is not differentiable w.r.t. `adj`**: `compute_L_hop_neighbors` uses discrete BFS on `edge_index`, so `df/dA` only captures gradient through `forward_dense`, not through neighborhood selection. **Fix**: Freeze neighbor structure from baseline graph and pass it explicitly so predicted and actual influence use consistent definitions.
-3. **`dirichlet_energy` dense vs sparse formulations may diverge**: Dense uses `(adj * sq_diff).sum() / adj.sum()`, sparse uses `mean over edge_index`. These match only if `make_differentiable_adj` produces adjacency with same directionality/multiplicity as `edge_index`. **Fix**: Verify equivalence or align definitions explicitly.
+1. **`dirichlet_energy` correlation still low (r = 0.11)**: Root cause (confirmed by GPT-5.2 review): PBRF retrains on cross-entropy to find `theta*`, but actual influence evaluates Dirichlet energy at `theta*`. The parameter shift component reflects how `theta` changes to minimize CE, not how DE changes. **Potential fix**: Decompose actual influence into structure-only (`f(theta_s, G_edited) - f(theta_s, G)`) vs parameter-update (`f(theta*, G_edited) - f(theta_s, G_edited)`) to isolate where correlation breaks.
+
+### High
+2. **Dense Dirichlet energy O(N^2*C) allocation** (`metrics.py:108-110`): `logits.unsqueeze(0) - logits.unsqueeze(1)` creates (N,N,C) tensor. Use `||h_i||^2 + ||h_j||^2 - 2h_i^Th_j` identity to avoid.
+3. **VJP `autograd.grad` target mismatch** (`influence.py:55-66`): Should differentiate w.r.t. `param_dict.values()` not `params` for full consistency with `functional_call`.
 
 ### Medium
-4. **`ggn_vector_product` VJP recomputes logits**: Step 3 calls `model(data.x, data.edge_index)` separately instead of reusing `functional_call` output from Step 1. Could desync if model has stateful behavior. **Fix**: Use `functional_call` for the VJP path too.
-5. **`over_squashing` scaling doesn't account for skipped nodes**: Scale factor assumes all `sample_nodes` are used, but nodes with small neighborhoods are skipped. **Fix**: Track count of included nodes and scale by `num_nodes / count`.
+4. **`train_model` optimizes all params** (`models.py:83`): Should use `model.sparse_params()` since dense params are overwritten by `_sync_dense_from_sparse` every step.
 
 ### Config
 - NUM_EDGES currently set to 20 for fast iteration; increase to 200 for final run
@@ -70,10 +77,11 @@ over_squashing and dirichlet_energy correlations still low — need further inve
 - [x] Fix #4: Fix `dirichlet_energy` edge set in dense mode
 - [x] Fix #5: Tune PBRF hyperparameters
 - [x] Fix #6: Wrap `_sync_dense_from_sparse` in `torch.no_grad()`
-- [ ] Fix `forward_dense` to match `GCNConv` exactly, tighten tolerance to <1e-3
-- [ ] Fix `over_squashing` neighbor masking consistency (freeze from baseline graph)
-- [ ] Fix `dirichlet_energy` dense/sparse definition alignment
-- [ ] Fix `ggn_vector_product` VJP to reuse `functional_call` output
-- [ ] Fix `over_squashing` scaling to account for skipped nodes
+- [x] Fix `forward_dense` to match `GCNConv` exactly, tighten tolerance to <1e-3 (was wrong op order: now lin→norm→bias; also set matmul precision to "highest" to avoid TF32 drift)
+- [x] Fix `over_squashing` neighbor masking consistency (freeze baseline L-hop neighbors, pass via kwarg)
+- [x] Fix `dirichlet_energy` dense/sparse definition alignment (fixed count in both paths, fixed dense denominator to use `edge_count`)
+- [x] Fix `ggn_vector_product` VJP to reuse `functional_call` output
+- [x] Fix `over_squashing` scaling to account for skipped nodes (track `included_count`)
+- [ ] Investigate dirichlet_energy low correlation (r = 0.11)
 - [ ] Verify correlation reaches 0.85+ on 200 edges x 3 metrics
 - [x] Full run: `uv run main.py` produces `figure2.png`

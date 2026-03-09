@@ -52,7 +52,7 @@ def ggn_vector_product(model, data, v_flat, damping=0.01):
     HJv = p * Jv_train - p * pJv
 
     # Step 3: VJP: J^T @ HJv
-    logits_for_grad = model(data.x, data.edge_index)
+    logits_for_grad = torch.func.functional_call(model, param_dict, (data.x, data.edge_index))
     grad_output = torch.zeros_like(logits_for_grad)
     grad_output[train_idx] = HJv.detach()
 

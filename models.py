@@ -59,11 +59,14 @@ class VanillaGCN(nn.Module):
         norm = deg_inv_sqrt.unsqueeze(1) * adj_hat * deg_inv_sqrt.unsqueeze(0)
 
         for i, lin in enumerate(self.lins[:-1]):
+            # Match GCNConv: linear (no bias) -> propagate -> add bias
+            x = x @ lin.weight.t()
             x = norm @ x
-            x = lin(x)
+            x = x + lin.bias
             x = F.relu(x)
+        x = x @ self.lins[-1].weight.t()
         x = norm @ x
-        x = self.lins[-1](x)
+        x = x + self.lins[-1].bias
         return x
 
     def dense_params(self):
