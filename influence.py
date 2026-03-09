@@ -10,16 +10,25 @@ def _get_params(model):
     return [p for p in model.parameters() if p.requires_grad]
 
 
-def ggn_vector_product(model, data, v_flat, damping=0.01):
+def ggn_vector_product(model, data, v_flat, damping=0.01, batch_idx=None):
     """Compute Generalized Gauss-Newton vector product: G @ v.
 
     G = (1/N) sum_{v in train} J_v^T H_v J_v + lambda*I
 
     Uses exact JVP via torch.func.jvp + functional_call.
+
+    Args:
+        batch_idx: Optional subset of training indices for stochastic GGN.
+            If None, uses all training nodes (exact GGN).
+            When provided, computes an unbiased estimate of the full-data
+            (1/N) GGN-VP by still dividing by N (not |batch|).
     """
     params = _get_params(model)
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     N = train_idx.shape[0]
+    # Use mini-batch if provided (stochastic GGN for LiSSA)
+    if batch_idx is not None:
+        train_idx = batch_idx
 
     # Reshape v_flat into parameter shapes (tangent vectors)
     v_list = []
@@ -99,6 +108,7 @@ def conjugate_gradient(model, data, target_vec, damping=0.01, max_iter=200,
     r = target_vec.clone()  # r = b - Ax, and x=0 so r=b
     p = r.clone()
     rs_old = r.dot(r)
+    residual = rs_old.sqrt().item()
 
     iterator = tqdm(range(max_iter), desc="CG") if verbose else range(max_iter)
 
@@ -127,6 +137,63 @@ def conjugate_gradient(model, data, target_vec, damping=0.01, max_iter=200,
     return x
 
 
+def lissa(model, data, target_vec, damping=0.01, max_iter=10000, tol=1e-5,
+          batch_size=None, verbose=True):
+    """Solve G^{-1} @ v using stochastic LiSSA (Neumann series).
+
+    Paper Section D, Eq. 37-38:
+        r^(0) = v, r^(k+1) = v + (I - G_s) @ r^(k)
+    where G_s = G/s, s > lambda_max(G), so G^{-1}v = (1/s) * G_s^{-1} * v.
+
+    Uses stochastic mini-batch GGN estimates per iteration (as in the original
+    LiSSA algorithm), providing implicit regularization via noise.
+
+    Args:
+        batch_size: Number of training nodes per mini-batch. None = all nodes (exact).
+    """
+    train_idx = data.train_mask.nonzero(as_tuple=True)[0]
+
+    # Estimate lambda_max for rescaling (use exact GGN for stability)
+    lambda_max = estimate_lambda_max(model, data, damping=damping)
+    s = lambda_max * 1.05  # safety margin
+    if verbose:
+        print(f"  LiSSA: lambda_max={lambda_max:.4e}, s={s:.4e}, "
+              f"batch_size={batch_size or 'all'}")
+
+    v_scaled = target_vec / s
+    r = v_scaled.clone()
+    diff = float("inf")
+
+    iterator = tqdm(range(max_iter), desc="LiSSA") if verbose else range(max_iter)
+
+    for k in iterator:
+        # Stochastic mini-batch: sample training nodes for this iteration
+        if batch_size is not None and batch_size < len(train_idx):
+            perm = torch.randperm(len(train_idx), device=train_idx.device)[:batch_size]
+            batch = train_idx[perm]
+        else:
+            batch = None  # use all training nodes
+
+        Gr = ggn_vector_product(model, data, r, damping=damping, batch_idx=batch)
+        r_new = v_scaled + r - Gr / s
+
+        diff = (r_new - r).norm().item()
+        if verbose and (k + 1) % 100 == 0:
+            tqdm.write(f"  LiSSA iter {k+1}: delta = {diff:.2e}")
+
+        if diff < tol:
+            if verbose:
+                print(f"LiSSA converged at iteration {k+1}, delta = {diff:.2e}")
+            break
+
+        r = r_new
+
+    if verbose and diff >= tol:
+        print(f"LiSSA finished at {max_iter} iters, delta = {diff:.2e}")
+
+    return r
+
+
 def compute_grad_f_theta(model, data, metric_fn, metric_kwargs=None):
     """Compute gradient of evaluation metric f w.r.t. model parameters.
 
@@ -148,10 +215,15 @@ def compute_grad_f_theta(model, data, metric_fn, metric_kwargs=None):
 
 
 def compute_ihvp(model, data, metric_fn, metric_kwargs=None, damping=0.01,
-                 cg_iter=200, verbose=True):
+                 solver="lissa", max_iter=200, batch_size=None, verbose=True):
     """Compute inverse-Hessian vector product: G^{-1} @ grad_f(theta_s).
 
-    Uses conjugate gradient. Computed once per metric, reused for all edges.
+    Computed once per metric, reused for all edges.
+
+    Args:
+        solver: "lissa" (paper default, stochastic Neumann series) or "cg" (conjugate gradient)
+        max_iter: max iterations for the solver (200 for CG, 10000 for LiSSA default)
+        batch_size: For LiSSA, number of training nodes per mini-batch (None=all).
     """
     if verbose:
         print("Computing grad_f(theta_s)...")
@@ -159,11 +231,22 @@ def compute_ihvp(model, data, metric_fn, metric_kwargs=None, damping=0.01,
     if verbose:
         print(f"||grad_f|| = {grad_f.norm().item():.6e}")
 
-    if verbose:
-        print("Running CG to solve G^{-1} @ grad_f...")
-    ihvp = conjugate_gradient(
-        model, data, grad_f, damping=damping, max_iter=cg_iter, verbose=verbose
-    )
+    if solver == "lissa":
+        lissa_iter = max_iter if max_iter != 200 else 10000
+        if verbose:
+            print(f"Running LiSSA to solve G^{{-1}} @ grad_f "
+                  f"(max_iter={lissa_iter}, batch_size={batch_size or 'all'})...")
+        ihvp = lissa(
+            model, data, grad_f, damping=damping, max_iter=lissa_iter,
+            batch_size=batch_size, verbose=verbose,
+        )
+    else:
+        if verbose:
+            print(f"Running CG to solve G^{{-1}} @ grad_f (max_iter={max_iter})...")
+        ihvp = conjugate_gradient(
+            model, data, grad_f, damping=damping, max_iter=max_iter, verbose=verbose
+        )
+
     if verbose:
         print(f"||ihvp|| = {ihvp.norm().item():.6e}")
     return ihvp
@@ -191,9 +274,11 @@ def compute_grad_A(model, data, metric_fn, metric_kwargs=None):
 
 
 def compute_parameter_shift(model, data, edge_index_edited, ihvp):
-    """Compute parameter shift term from Eq. 10.
+    """Compute parameter shift term from Eq. 12.
 
-    param_shift = -(1/N) * ihvp^T @ (grad_theta_orig - grad_theta_edited)
+    param_shift = (1/N) * ihvp^T @ (grad_theta_orig - grad_theta_edited)
+
+    Positive sign because ε=-1/N cancels the negative from Eq. 10.
     """
     params = _get_params(model)
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]

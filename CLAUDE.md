@@ -30,18 +30,36 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 | `models.py` | VanillaGCN with sparse (`forward`) and dense (`forward_dense`) modes |
 | `data.py` | Cora loading, edge sampling/editing utilities |
 | `metrics.py` | Validation loss, over-squashing (Eq. 14), Dirichlet energy |
-| `influence.py` | GGN-vector product, CG-based IHVP, parameter shift (Eq. 10), message propagation (Eq. 11) |
+| `influence.py` | GGN-vector product, CG + LiSSA IHVP solvers, parameter shift (Eq. 10), message propagation (Eq. 11) |
 | `retrain.py` | PBRF fine-tuning (Eq. 9) for computing actual influence |
-| `plot.py` | Scatter plot generation |
+| `plot.py` | 2x3 scatter plot (deletion/insertion rows, matching paper Figure 2 format) |
 | `main.py` | End-to-end orchestration |
+| `tune_vl_damping.py` | VL damping + solver sweep utility |
+| `tune_hyperparams.py` | Weight decay + damping hyperparameter sweep |
 
 ## Current Status
 
-- validation_loss correlation: **r = 0.374** (200 edges, damping=0.01) — needs damping tuning
+- validation_loss correlation: **r = 0.374** (200 edges, damping=0.01) — see VL Correlation Analysis below
 - over_squashing correlation: **r = 0.914** (200 edges, damping=0.1)
 - dirichlet_energy correlation: **r = 0.947** (200 edges, damping=0.1)
 - Dense/sparse forward max diff: **5.72e-06** (well within 1e-3 tolerance)
 - Per-metric damping implemented (paper tunes λ from {0.1, 0.01, 0.001, 0.0001})
+- LiSSA solver implemented (both exact and stochastic mini-batch variants)
+- Spearman rank correlation reported alongside Pearson
+
+## VL Correlation Analysis
+
+The paper achieves r=0.88 for VL on Cora (Figure 2). Our r=0.374 gap is due to:
+
+1. **Over-trained model**: 100% train accuracy after 200 epochs (2000 total) makes GGN eigenvalues near-zero. The first-order Taylor approximation (Eq. 12) breaks for edges near training nodes where param_shift values are ~100x actual parameter_update.
+
+2. **Hyperparameter sensitivity**: The paper tunes {LR, hidden_dim, WD} on a grid and selects damping per metric. Our fixed config (LR=0.1, hidden=64, WD=1e-4) may not match their optimal. WD=1e-3 improves VL to r=0.49 but destroys OQ (r=0.91→0.52).
+
+3. **Stochastic LiSSA**: Paper uses stochastic mini-batch GGN estimates per LiSSA iteration. Implemented but provides only marginal improvement (r=0.37→0.47 at batch=20, damping=0.1).
+
+4. **Damping sweep results** (200 edges): Best Pearson r=0.72 at damping=5.0, best Spearman ρ=0.90 at damping=5.0. No damping value reaches r≥0.85.
+
+**To achieve r≥0.85**: Likely requires hyperparameter tuning (LR/WD grid search) to match the paper's model, which would change all metrics. The paper's model likely has a better-conditioned GGN.
 
 ## Resolved Issues
 
@@ -60,17 +78,6 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 13. ~~**VJP autograd.grad target mismatch**~~: Fixed to differentiate w.r.t. `param_dict.values()` instead of `params`.
 14. ~~**train_model optimizer scope**~~: Changed to `model.sparse_params()` since dense params are overwritten by sync.
 
-## Remaining Issues
-
-### Critical
-1. **`validation_loss` correlation low at 200 edges (r = 0.374)**: Root cause: over-trained model (100% train acc) makes GGN eigenvalues near-zero, amplifying param_shift outliers via the first-order approximation. A few edges near training nodes produce param_shift values ~100x larger than actual parameter_update. **Fix needed**: tune VL damping — `tune_vl_damping.py` sweeps {0.001, 0.01, 0.05, 0.1, 0.5, 1.0}.
-
-### Resolved (this session)
-- ~~DE correlation low (r=0.11)~~: Fixed via per-metric damping (DE λ=0.1 → r=0.947)
-- ~~Dense DE O(N²C) allocation~~: Fixed with `||h_i||² + ||h_j||² - 2h_i^Th_j` identity
-- ~~VJP autograd.grad target mismatch~~: Fixed to use `param_dict.values()`
-- ~~train_model optimizes all params~~: Fixed to use `model.sparse_params()`
-
 ## Task List
 - [x] Fix #1: Replace finite-diff JVP with `torch.func.jvp` in `ggn_vector_product`
 - [x] Fix #2: Restrict PBRF proximal + optimizer to `sparse_params()` only
@@ -78,19 +85,24 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 - [x] Fix #4: Fix `dirichlet_energy` edge set in dense mode
 - [x] Fix #5: Tune PBRF hyperparameters
 - [x] Fix #6: Wrap `_sync_dense_from_sparse` in `torch.no_grad()`
-- [x] Fix `forward_dense` to match `GCNConv` exactly, tighten tolerance to <1e-3 (was wrong op order: now lin→norm→bias; also set matmul precision to "highest" to avoid TF32 drift)
-- [x] Fix `over_squashing` neighbor masking consistency (freeze baseline L-hop neighbors, pass via kwarg)
-- [x] Fix `dirichlet_energy` dense/sparse definition alignment (fixed count in both paths, fixed dense denominator to use `edge_count`)
+- [x] Fix `forward_dense` to match `GCNConv` exactly, tighten tolerance to <1e-3
+- [x] Fix `over_squashing` neighbor masking consistency
+- [x] Fix `dirichlet_energy` dense/sparse definition alignment
 - [x] Fix `ggn_vector_product` VJP to reuse `functional_call` output
-- [x] Fix `over_squashing` scaling to account for skipped nodes (track `included_count`)
-- [x] Investigate dirichlet_energy low correlation (r = 0.11 → r = 0.947 with damping=0.1)
+- [x] Fix `over_squashing` scaling to account for skipped nodes
+- [x] Investigate dirichlet_energy low correlation (r = 0.11 → r = 0.947)
 - [x] Implement per-metric damping (VL=0.01, OQ=0.1, DE=0.1)
-- [x] Fix dense DE O(N²C) allocation (use quadratic expansion identity)
-- [x] Fix VJP autograd.grad target (use `param_dict.values()`)
-- [x] Fix train_model optimizer scope (use `model.sparse_params()`)
-- [ ] Tune VL damping (current r=0.374 at damping=0.01, sweep {0.001..1.0})
-- [ ] Verify all 3 correlations ≥ 0.85 on 200 edges
-- [ ] Remove `_sync_dense_from_sparse()` from `forward_dense()`, sync explicitly at call sites (`models.py:54`)
-- [ ] Replace identity-based param selection with name-based matching in `ggn_vector_product` (`influence.py:37`)
-- [ ] Add NaN/negative-denominator guard in CG solver (`influence.py:107`)
+- [x] Fix dense DE O(N²C) allocation
+- [x] Fix VJP autograd.grad target
+- [x] Fix train_model optimizer scope
+- [x] Implement LiSSA solver (exact + stochastic)
+- [x] Add Spearman rank correlation alongside Pearson
+- [x] Outlier-robust plotting (percentile axis limits, 2x3 format matching paper)
+- [x] VL damping sweep ({0.001..50.0}) — best r=0.72 at damping=5.0
+- [x] Stochastic LiSSA sweep (batch_size={10,20,50}) — marginal improvement
+- [x] Weight decay sweep ({1e-3..1e-5}) — WD=1e-3 helps VL but hurts OQ
 - [x] Full run: `uv run main.py` produces `figure2.png`
+- [ ] Hyperparameter grid search (LR × WD × hidden_dim) to match paper's VL r=0.88
+- [ ] Remove `_sync_dense_from_sparse()` from `forward_dense()`, sync explicitly at call sites
+- [ ] Replace identity-based param selection with name-based matching in `ggn_vector_product`
+- [ ] Add NaN/negative-denominator guard in CG solver

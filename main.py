@@ -31,6 +31,8 @@ LR = 0.1
 WEIGHT_DECAY = 1e-4
 TRAIN_EPOCHS = 2000
 DAMPING = 0.1
+SOLVER = "lissa"  # "lissa" (paper default) or "cg"
+LISSA_BATCH = None  # mini-batch size for stochastic LiSSA (None=exact)
 CG_ITER = 200
 NUM_EDGES = 200  # per type (deletion/insertion)
 SEED = 42
@@ -118,12 +120,16 @@ def process_edges(model, data, edges, is_deletion, metric_fn, metric_kwargs,
 
 
 def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
-               deletion_edges, insertion_edges, damping=None):
+               deletion_edges, insertion_edges, damping=None, solver=None,
+               batch_size=None):
     """Run influence estimation and actual influence for one metric."""
     metric_damping = damping if damping is not None else DAMPING
+    metric_solver = solver if solver is not None else SOLVER
+    metric_batch = batch_size if batch_size is not None else LISSA_BATCH
     metric_t0 = time.time()
     print(f"\n{'='*60}")
-    print(f"Processing metric: {metric_name} (damping={metric_damping})")
+    print(f"Processing metric: {metric_name} (damping={metric_damping}, "
+          f"solver={metric_solver}, batch={metric_batch})")
     print(f"{'='*60}")
 
     # Step 1: Compute IHVP (once per metric)
@@ -131,7 +137,9 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
     t0 = time.time()
     ihvp = compute_ihvp(
         model, data, metric_fn, metric_kwargs=metric_kwargs,
-        damping=metric_damping, cg_iter=CG_ITER, verbose=True,
+        damping=metric_damping, solver=metric_solver, max_iter=CG_ITER,
+        batch_size=metric_batch if metric_solver == "lissa" else None,
+        verbose=True,
     )
     print(f"IHVP computed in {time.time() - t0:.1f}s")
 
@@ -166,7 +174,7 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
     )
 
     # Print sub-component correlations for diagnostics
-    from scipy.stats import pearsonr
+    from scipy.stats import pearsonr, spearmanr
     import numpy as np
 
     n = len(merged["predicted"])
@@ -177,14 +185,23 @@ def run_metric(model, data, metric_name, metric_fn, metric_kwargs,
         pu = np.array(merged["parameter_update"])
         pred = np.array(merged["predicted"])
         actual = np.array(merged["actual"])
+        is_del = np.array(merged["is_deletion"])
 
         print(f"\n--- {metric_name} Diagnostic Correlations ---")
         r_mp_so, _ = pearsonr(mp, so)
         r_ps_pu, _ = pearsonr(ps, pu)
         r_total, _ = pearsonr(pred, actual)
+        rho_total, _ = spearmanr(pred, actual)
         print(f"  msg_prop vs structure_only:   r = {r_mp_so:.4f}")
         print(f"  param_shift vs param_update:  r = {r_ps_pu:.4f}")
-        print(f"  predicted vs actual (total):  r = {r_total:.4f}")
+        print(f"  predicted vs actual (total):  r = {r_total:.4f}, ρ = {rho_total:.4f}")
+
+        # Separate deletion/insertion correlations (paper reports these separately)
+        for label, mask in [("deletion", is_del), ("insertion", ~is_del)]:
+            if mask.sum() > 2:
+                r_sub, _ = pearsonr(pred[mask], actual[mask])
+                rho_sub, _ = spearmanr(pred[mask], actual[mask])
+                print(f"  {label}: r = {r_sub:.4f}, ρ = {rho_sub:.4f} (n={mask.sum()})")
 
         # Print magnitude stats
         print(f"  |msg_prop| mean={np.abs(mp).mean():.4e} std={np.abs(mp).std():.4e}")
@@ -203,7 +220,7 @@ def main():
     torch.set_float32_matmul_precision("highest")
     print(f"Device: {DEVICE}")
     print(f"Config: NUM_EDGES={NUM_EDGES}, PBRF_LR={PBRF_LR}, PBRF_STEPS={PBRF_STEPS}, "
-          f"DAMPING={DAMPING}, CG_ITER={CG_ITER}")
+          f"DAMPING={DAMPING}, SOLVER={SOLVER}, CG_ITER={CG_ITER}")
 
     # --- Load Data ---
     print("\n--- Loading Cora ---")
@@ -270,13 +287,14 @@ def main():
         )
 
         # Print running correlation after each metric
-        from scipy.stats import pearsonr
+        from scipy.stats import pearsonr, spearmanr
         import numpy as np
         pred = np.array(results[metric_name]["predicted"])
         actual = np.array(results[metric_name]["actual"])
         if len(pred) > 2:
             corr, pval = pearsonr(pred, actual)
-            print(f">>> {metric_name} correlation: r = {corr:.4f} (p = {pval:.2e})")
+            rho, _ = spearmanr(pred, actual)
+            print(f">>> {metric_name} correlation: r = {corr:.4f}, ρ = {rho:.4f} (p = {pval:.2e})")
 
     print(f"\nTotal pipeline time: {time.time() - total_t0:.1f}s")
 
@@ -285,15 +303,21 @@ def main():
     plot_figure2(results, output_path="figure2.png")
 
     # --- Print correlations ---
-    from scipy.stats import pearsonr
+    from scipy.stats import pearsonr, spearmanr
     import numpy as np
 
-    print("\n--- Final Correlations ---")
+    print("\n--- Final Correlations (separate deletion/insertion, as in paper) ---")
     for metric_name in metrics:
         pred = np.array(results[metric_name]["predicted"])
         actual = np.array(results[metric_name]["actual"])
-        corr, pval = pearsonr(pred, actual)
-        print(f"{metric_name}: r = {corr:.4f} (p = {pval:.2e})")
+        is_del = np.array(results[metric_name]["is_deletion"])
+        r_p, pval = pearsonr(pred, actual)
+        r_s, _ = spearmanr(pred, actual)
+        print(f"{metric_name} (combined): r = {r_p:.4f}, ρ = {r_s:.4f}")
+        for label, mask in [("  deletion", is_del), ("  insertion", ~is_del)]:
+            if mask.sum() > 2:
+                r_sub, _ = pearsonr(pred[mask], actual[mask])
+                print(f"  {label}: r = {r_sub:.4f}")
 
     print("\nDone!")
 
