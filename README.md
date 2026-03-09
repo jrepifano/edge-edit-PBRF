@@ -43,8 +43,9 @@ Key hyperparameters in `main.py`:
 
 - Model training: working (val acc ~79%)
 - Dense/sparse forward equivalence: verified
-- Metrics (validation loss, Dirichlet energy): working with both sparse and dense modes
-- GGN-vector product, CG solver, grad_A: implemented
-- PBRF retraining: implemented
-- End-to-end pipeline: functional, correlation tuning in progress
+- GGN-vector product: exact JVP via `torch.func.jvp` + `functional_call`
+- CG solver, grad_A, PBRF retraining: implemented and working
+- End-to-end pipeline: functional, produces `figure2.png`
+- **validation_loss: r = 0.9452** (20 edges)
+- over_squashing, dirichlet_energy: correlation tuning in progress
 - Target: correlations 0.85+ across all 3 metrics

@@ -125,14 +125,6 @@ def retrain_for_actual_influence(
             break
         prev_loss = loss_val
 
-    # Always print final convergence status (not just when verbose)
-    final_step = step + 1
-    if abs(prev_loss - loss_val) < tol:
-        pass  # already printed if verbose
-    elif not verbose and final_step == max_steps:
-        # Silently note non-convergence for debugging
-        pass
-
     return model_retrained
 
 

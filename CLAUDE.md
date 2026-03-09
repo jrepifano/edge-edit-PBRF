@@ -35,26 +35,34 @@ Reproducing Figure 2 from the paper: predicted vs actual influence on Cora with 
 | `plot.py` | Scatter plot generation |
 | `main.py` | End-to-end orchestration |
 
-## Current Issues (correlation ~0.08, target 0.85+)
+## Current Status
 
-### Critical
-1. **`influence.py` — Finite-diff JVP breaks CG**: `ggn_vector_product` uses `eps=1e-4` finite differences with `.data` mutation. Noise makes the linear operator inconsistent across CG iterations. **Fix**: Replace with exact JVP via `torch.func.jvp` + `functional_call`.
-2. **`retrain.py` — PBRF double-penalizes parameters**: Proximal term iterates `model.named_parameters()` which includes both `convs` AND `lins` (mirror copies), doubling regularization and shrinking actual influence. **Fix**: Restrict optimizer + proximal to `sparse_params()` only.
+validation_loss correlation: **r = 0.9452** (20 edges, target 0.85+)
+over_squashing and dirichlet_energy correlations still low — need further investigation.
 
-### High
-3. **`metrics.py` — `over_squashing` infeasible for `grad_A`**: 2708 forward passes per call; will OOM or take hours in dense-adj mode. **Fix**: Vectorize or skip `grad_A` for this metric.
-4. **`metrics.py` — `dirichlet_energy` uses wrong edges in dense mode**: Sums energy over `data.edge_index` even when `adj` is provided. **Fix**: Derive `src, dst` from `adj.nonzero()` when adj is supplied.
+## Resolved Issues
 
-### Medium
-5. **`main.py` — PBRF hyperparams**: `PBRF_LR` and `PBRF_STEPS` may need tuning for convergence.
-6. **`models.py` — `_sync_dense_from_sparse()`** uses `.data.copy_` inside `forward_dense`, which can break autograd. Wrap in `torch.no_grad()`.
+1. ~~**`influence.py` — Finite-diff JVP breaks CG**~~: Replaced with exact `torch.func.jvp` + `functional_call`.
+2. ~~**`retrain.py` — PBRF double-penalizes parameters**~~: Restricted optimizer + proximal to `sparse_params()` only.
+3. ~~**`metrics.py` — `over_squashing` infeasible for `grad_A`**~~: Samples 100 nodes instead of all 2708 (27x speedup), grad_A now enabled.
+4. ~~**`metrics.py` — `dirichlet_energy` uses wrong edges in dense mode**~~: Dense mode now uses fully differentiable `(adj * sq_diff).sum() / adj.sum()` formulation.
+5. ~~**`main.py` — PBRF hyperparams**~~: Tuned to `PBRF_LR=0.01`, `PBRF_STEPS=1000`.
+6. ~~**`models.py` — `_sync_dense_from_sparse()` breaks autograd**~~: Wrapped in `torch.no_grad()`.
+
+## Remaining Issues
+
+- over_squashing correlation near zero — may need different approach for this metric
+- dirichlet_energy correlation near zero — investigate grad_A or actual influence computation
+- NUM_EDGES currently set to 20 for fast iteration; increase to 200 for final run
 
 ## Task List
-- [ ] Fix #1: Replace finite-diff JVP with `torch.func.jvp` in `ggn_vector_product`
-- [ ] Fix #2: Restrict PBRF proximal + optimizer to `sparse_params()` only
-- [ ] Fix #3: Make `over_squashing` feasible for dense-adj gradient (or skip `grad_A`)
-- [ ] Fix #4: Fix `dirichlet_energy` edge set in dense mode
-- [ ] Fix #5: Tune PBRF hyperparameters
-- [ ] Fix #6: Wrap `_sync_dense_from_sparse` in `torch.no_grad()`
+- [x] Fix #1: Replace finite-diff JVP with `torch.func.jvp` in `ggn_vector_product`
+- [x] Fix #2: Restrict PBRF proximal + optimizer to `sparse_params()` only
+- [x] Fix #3: Make `over_squashing` feasible for dense-adj gradient (sample 100 nodes)
+- [x] Fix #4: Fix `dirichlet_energy` edge set in dense mode
+- [x] Fix #5: Tune PBRF hyperparameters
+- [x] Fix #6: Wrap `_sync_dense_from_sparse` in `torch.no_grad()`
+- [ ] Fix over_squashing correlation
+- [ ] Fix dirichlet_energy correlation
 - [ ] Verify correlation reaches 0.85+ on 200 edges x 3 metrics
-- [ ] Full run: `uv run main.py` produces `figure2.png`
+- [x] Full run: `uv run main.py` produces `figure2.png`
