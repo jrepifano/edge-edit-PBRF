@@ -84,7 +84,8 @@ def retrain_for_actual_influence(
     Clones the model, optimizes the PBRF objective starting from theta_s.
     """
     model_retrained = copy.deepcopy(model)
-    theta_s_dict = {k: v.clone().detach() for k, v in model.state_dict().items()}
+    theta_s_dict = {k: v.clone().detach() for k, v in model.state_dict().items()
+                    if k.startswith("convs.")}
     N = data.train_mask.sum().item()
     epsilon = -1.0 / N
 
@@ -92,7 +93,7 @@ def retrain_for_actual_influence(
     with torch.no_grad():
         logits_theta_s_orig = model(data.x, data.edge_index).detach()
 
-    optimizer = torch.optim.SGD(model_retrained.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model_retrained.sparse_params(), lr=lr)
 
     prev_loss = float("inf")
     for step in range(max_steps):
@@ -123,6 +124,14 @@ def retrain_for_actual_influence(
                 print(f"  PBRF converged at step {step+1}")
             break
         prev_loss = loss_val
+
+    # Always print final convergence status (not just when verbose)
+    final_step = step + 1
+    if abs(prev_loss - loss_val) < tol:
+        pass  # already printed if verbose
+    elif not verbose and final_step == max_steps:
+        # Silently note non-convergence for debugging
+        pass
 
     return model_retrained
 

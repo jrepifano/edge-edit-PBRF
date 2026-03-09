@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - use `uv` to run python in this directory
 - use `uvx ruff` to lint the files
 - update the README.md file after each task completion
+- update the CLAUDE.md file after each task completion with updates and current task list.
+- if you run into any issues that you can't solve after 2 tries, use `/pal:chat` with `gemini-3-pro`
 - use `/pal:review` with `gpt-5.2` after each task completion
 
 ## Project Overview

@@ -25,10 +25,11 @@ class VanillaGCN(nn.Module):
 
     def _sync_dense_from_sparse(self):
         """Copy weights from GCNConv layers to dense Linear layers."""
-        for conv, lin in zip(self.convs, self.lins):
-            lin.weight.data.copy_(conv.lin.weight.data)
-            if conv.bias is not None and lin.bias is not None:
-                lin.bias.data.copy_(conv.bias.data)
+        with torch.no_grad():
+            for conv, lin in zip(self.convs, self.lins):
+                lin.weight.data.copy_(conv.lin.weight.data)
+                if conv.bias is not None and lin.bias is not None:
+                    lin.bias.data.copy_(conv.bias.data)
 
     def _sync_sparse_from_dense(self):
         """Copy weights from dense Linear layers to GCNConv layers."""

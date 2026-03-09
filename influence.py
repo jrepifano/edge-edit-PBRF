@@ -15,37 +15,38 @@ def ggn_vector_product(model, data, v_flat, damping=0.01):
 
     G = (1/N) sum_{v in train} J_v^T H_v J_v + lambda*I
 
-    Uses JVP (finite diff) -> Hessian-output product -> VJP decomposition.
+    Uses exact JVP via torch.func.jvp + functional_call.
     """
     params = _get_params(model)
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     N = train_idx.shape[0]
 
-    # Reshape v_flat into parameter shapes
+    # Reshape v_flat into parameter shapes (tangent vectors)
     v_list = []
     offset = 0
     for p in params:
         numel = p.numel()
-        v_list.append(v_flat[offset : offset + numel].view(p.shape))
+        v_list.append(v_flat[offset:offset + numel].view(p.shape))
         offset += numel
 
-    # Step 1: JVP via finite differences
-    eps = 1e-4
-    orig_params = [p.data.clone() for p in params]
-    for p, vp in zip(params, v_list):
-        p.data.add_(vp, alpha=eps)
-    with torch.no_grad():
-        logits_plus = model(data.x, data.edge_index)
-    for p, op in zip(params, orig_params):
-        p.data.copy_(op)
-    with torch.no_grad():
-        logits_orig = model(data.x, data.edge_index)
+    # Build param dict and tangent dict for functional_call
+    param_dict = {}
+    tangent_dict = {}
+    v_idx = 0
+    for name, p in model.named_parameters():
+        if any(p is sp for sp in params):
+            param_dict[name] = p
+            tangent_dict[name] = v_list[v_idx]
+            v_idx += 1
 
-    Jv = (logits_plus - logits_orig) / eps  # (N_nodes, C)
+    # Step 1: Exact JVP via torch.func.jvp + functional_call
+    def fn(param_values):
+        return torch.func.functional_call(model, param_values, (data.x, data.edge_index))
 
-    # Step 2: Hessian-output product for cross-entropy on training nodes
-    # H_h L = diag(p) - p p^T, so H @ x = p*x - p*(p^T x)
-    p = F.softmax(logits_orig[train_idx], dim=1)
+    logits_orig, Jv = torch.func.jvp(fn, (param_dict,), (tangent_dict,))
+
+    # Step 2: Hessian-output product (softmax Hessian of cross-entropy)
+    p = F.softmax(logits_orig[train_idx].detach(), dim=1)
     Jv_train = Jv[train_idx]
     pJv = (p * Jv_train).sum(dim=1, keepdim=True)
     HJv = p * Jv_train - p * pJv
@@ -53,7 +54,7 @@ def ggn_vector_product(model, data, v_flat, damping=0.01):
     # Step 3: VJP: J^T @ HJv
     logits_for_grad = model(data.x, data.edge_index)
     grad_output = torch.zeros_like(logits_for_grad)
-    grad_output[train_idx] = HJv
+    grad_output[train_idx] = HJv.detach()
 
     grads = torch.autograd.grad(
         logits_for_grad, params, grad_outputs=grad_output,
@@ -134,7 +135,9 @@ def compute_grad_f_theta(model, data, metric_fn, metric_kwargs=None):
         metric_kwargs = {}
     model.zero_grad()
 
+    print(f"  compute_grad_f_theta: calling metric_fn={metric_fn.__name__}...", flush=True)
     val = metric_fn(model, data, **metric_kwargs)
+    print(f"  compute_grad_f_theta: metric_fn returned {val.item():.6e}, computing grads...", flush=True)
     params = _get_params(model)
     grads = torch.autograd.grad(val, params, retain_graph=False, allow_unused=True)
     return torch.cat([
@@ -179,7 +182,9 @@ def compute_grad_A(model, data, metric_fn, metric_kwargs=None):
     kwargs["adj"] = adj
     kwargs.pop("edge_index", None)
 
+    print(f"  compute_grad_A: calling metric_fn={metric_fn.__name__} with dense adj...", flush=True)
     val = metric_fn(model, data, **kwargs)
+    print(f"  compute_grad_A: metric_fn returned {val.item():.6e}, computing grad_adj...", flush=True)
     grad_adj = torch.autograd.grad(val, adj, retain_graph=False)[0]
     return grad_adj.detach()
 
