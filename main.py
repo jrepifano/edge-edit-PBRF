@@ -36,8 +36,9 @@ LISSA_BATCH = None  # mini-batch size for stochastic LiSSA (None=exact)
 CG_ITER = 200
 NUM_EDGES = 200  # per type (deletion/insertion)
 SEED = 42
-PBRF_LR = 0.01
-PBRF_STEPS = 1000
+PBRF_OPTIMIZER = "lbfgs"  # "sgd" or "lbfgs"
+PBRF_LR = 1.0             # 1.0 for L-BFGS, 0.01 for SGD
+PBRF_STEPS = 10            # 10 outer steps for L-BFGS, 1000 for SGD
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # -----------------------------------------------
 
@@ -85,6 +86,7 @@ def process_edges(model, data, edges, is_deletion, metric_fn, metric_kwargs,
         model_retrained = retrain_for_actual_influence(
             model, data, edge_index_edited,
             damping=pbrf_damping, lr=PBRF_LR, max_steps=PBRF_STEPS,
+            optimizer_type=PBRF_OPTIMIZER,
         )
         actual, struct_only, param_upd = compute_actual_influence(
             model, model_retrained, data, edge_index_edited, metric_fn,
@@ -219,8 +221,8 @@ def main():
     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision("highest")
     print(f"Device: {DEVICE}")
-    print(f"Config: NUM_EDGES={NUM_EDGES}, PBRF_LR={PBRF_LR}, PBRF_STEPS={PBRF_STEPS}, "
-          f"DAMPING={DAMPING}, SOLVER={SOLVER}, CG_ITER={CG_ITER}")
+    print(f"Config: NUM_EDGES={NUM_EDGES}, PBRF_OPT={PBRF_OPTIMIZER}, PBRF_LR={PBRF_LR}, "
+          f"PBRF_STEPS={PBRF_STEPS}, DAMPING={DAMPING}, SOLVER={SOLVER}, CG_ITER={CG_ITER}")
 
     # --- Load Data ---
     print("\n--- Loading Cora ---")
@@ -260,7 +262,7 @@ def main():
         "validation_loss": {
             "fn": validation_loss,
             "kwargs": {},
-            "damping": 0.01,
+            "damping": 1.0,
         },
         "over_squashing": {
             "fn": over_squashing,
@@ -297,6 +299,13 @@ def main():
             print(f">>> {metric_name} correlation: r = {corr:.4f}, ρ = {rho:.4f} (p = {pval:.2e})")
 
     print(f"\nTotal pipeline time: {time.time() - total_t0:.1f}s")
+
+    # --- Save raw results ---
+    import pickle
+    results_path = "results.pkl"
+    with open(results_path, "wb") as f:
+        pickle.dump(results, f)
+    print(f"\nRaw results saved to {results_path}")
 
     # --- Plot ---
     print("\n--- Generating figure ---")

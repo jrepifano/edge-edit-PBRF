@@ -80,11 +80,21 @@ class VanillaGCN(nn.Module):
         return list(self.convs.parameters())
 
 
-def train_model(model, data, lr=0.01, weight_decay=1e-5, epochs=2000, verbose=True):
-    """Train a GCN model on graph data using SGD."""
+def train_model(model, data, lr=0.01, weight_decay=1e-5, epochs=2000,
+                verbose=True, checkpoint_epochs=None):
+    """Train a GCN model on graph data using SGD.
+
+    Args:
+        checkpoint_epochs: Optional list of epochs at which to save checkpoints.
+            When provided, returns (model, checkpoints_dict) instead of just model.
+    """
+    import copy
+
     optimizer = torch.optim.SGD(
         model.sparse_params(), lr=lr, weight_decay=weight_decay
     )
+
+    checkpoints = {} if checkpoint_epochs is not None else None
 
     model.train()
     for epoch in range(epochs):
@@ -96,6 +106,29 @@ def train_model(model, data, lr=0.01, weight_decay=1e-5, epochs=2000, verbose=Tr
 
         # Sync dense layers after each step
         model._sync_dense_from_sparse()
+
+        # Save checkpoint if requested
+        if checkpoint_epochs is not None and (epoch + 1) in checkpoint_epochs:
+            model.eval()
+            with torch.no_grad():
+                logits = model(data.x, data.edge_index)
+                val_pred = logits[data.val_mask].argmax(dim=1)
+                val_acc = (val_pred == data.y[data.val_mask]).float().mean().item()
+                train_pred = logits[data.train_mask].argmax(dim=1)
+                train_acc = (train_pred == data.y[data.train_mask]).float().mean().item()
+                probs = F.softmax(logits[data.train_mask], dim=1)
+                confidence = probs.max(dim=1).values.mean().item()
+            checkpoints[epoch + 1] = {
+                "state_dict": copy.deepcopy(model.state_dict()),
+                "train_acc": train_acc,
+                "val_acc": val_acc,
+                "train_loss": loss.item(),
+                "confidence": confidence,
+            }
+            if verbose:
+                print(f"  Checkpoint @ epoch {epoch+1}: train_acc={train_acc:.4f}, "
+                      f"val_acc={val_acc:.4f}, confidence={confidence:.4f}")
+            model.train()
 
         if verbose and (epoch + 1) % 200 == 0:
             model.eval()
@@ -121,4 +154,7 @@ def train_model(model, data, lr=0.01, weight_decay=1e-5, epochs=2000, verbose=Tr
         test_pred = logits[data.test_mask].argmax(dim=1)
         test_acc = (test_pred == data.y[data.test_mask]).float().mean().item()
     print(f"Final Val Acc: {val_acc:.4f} | Test Acc: {test_acc:.4f}")
+
+    if checkpoint_epochs is not None:
+        return model, checkpoints
     return model

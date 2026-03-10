@@ -20,8 +20,8 @@ def ggn_vector_product(model, data, v_flat, damping=0.01, batch_idx=None):
     Args:
         batch_idx: Optional subset of training indices for stochastic GGN.
             If None, uses all training nodes (exact GGN).
-            When provided, computes an unbiased estimate of the full-data
-            (1/N) GGN-VP by still dividing by N (not |batch|).
+            When provided, computes a mini-batch approximation of the
+            mean GGN-VP by averaging over the batch (dividing by |batch|).
     """
     params = _get_params(model)
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
@@ -76,7 +76,8 @@ def ggn_vector_product(model, data, v_flat, damping=0.01, batch_idx=None):
     ])
 
     # Average over training set and add damping
-    result = result / N + damping * v_flat
+    divisor = len(batch_idx) if batch_idx is not None else N
+    result = result / divisor + damping * v_flat
     return result
 
 

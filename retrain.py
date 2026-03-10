@@ -1,4 +1,5 @@
 import copy
+import math
 
 import torch
 import torch.nn.functional as F
@@ -78,10 +79,15 @@ def retrain_for_actual_influence(
     max_steps=1000,
     tol=1e-8,
     verbose=False,
+    optimizer_type="sgd",
 ):
     """Retrain model using PBRF fine-tuning (Eq. 9) to get theta*.
 
     Clones the model, optimizes the PBRF objective starting from theta_s.
+
+    Args:
+        optimizer_type: "sgd" (original) or "lbfgs" (better convergence for VL).
+            For L-BFGS, lr=1.0 and max_steps=10 (outer iterations) recommended.
     """
     model_retrained = copy.deepcopy(model)
     theta_s_dict = {k: v.clone().detach() for k, v in model.state_dict().items()
@@ -93,37 +99,98 @@ def retrain_for_actual_influence(
     with torch.no_grad():
         logits_theta_s_orig = model(data.x, data.edge_index).detach()
 
-    optimizer = torch.optim.SGD(model_retrained.sparse_params(), lr=lr)
-
-    prev_loss = float("inf")
-    for step in range(max_steps):
-        optimizer.zero_grad()
-        loss = compute_edge_edit_pbrf_loss(
-            model_retrained,
-            data,
-            data.edge_index,
-            edge_index_edited,
-            logits_theta_s_orig,
-            theta_s_dict,
-            damping,
-            epsilon,
+    if optimizer_type == "lbfgs":
+        optimizer = torch.optim.LBFGS(
+            model_retrained.sparse_params(),
+            lr=lr,
+            max_iter=20,
+            line_search_fn="strong_wolfe",
+            tolerance_grad=1e-9,
+            tolerance_change=1e-12,
         )
-        loss.backward()
-        optimizer.step()
 
-        # Sync dense params if model has them
-        if hasattr(model_retrained, "_sync_dense_from_sparse"):
-            model_retrained._sync_dense_from_sparse()
+        prev_loss = float("inf")
+        for step in range(max_steps):
+            def closure():
+                optimizer.zero_grad()
+                loss = compute_edge_edit_pbrf_loss(
+                    model_retrained,
+                    data,
+                    data.edge_index,
+                    edge_index_edited,
+                    logits_theta_s_orig,
+                    theta_s_dict,
+                    damping,
+                    epsilon,
+                )
+                loss.backward()
+                return loss
 
-        loss_val = loss.item()
-        if verbose and (step + 1) % 100 == 0:
-            print(f"  PBRF step {step+1}: loss = {loss_val:.8f}")
+            loss = optimizer.step(closure)
+            loss_val = loss.item()
 
-        if abs(prev_loss - loss_val) < tol:
-            if verbose:
-                print(f"  PBRF converged at step {step+1}")
-            break
-        prev_loss = loss_val
+            # NaN guard: if L-BFGS diverges, restore theta_s and fall back to SGD
+            if not math.isfinite(loss_val):
+                if verbose:
+                    print(f"  PBRF L-BFGS NaN at step {step+1}, falling back to SGD")
+                model_retrained = copy.deepcopy(model)
+                sgd_opt = torch.optim.SGD(model_retrained.sparse_params(), lr=0.01)
+                prev_sgd_loss = float("inf")
+                for sgd_step in range(1000):
+                    sgd_opt.zero_grad()
+                    sgd_loss = compute_edge_edit_pbrf_loss(
+                        model_retrained, data, data.edge_index, edge_index_edited,
+                        logits_theta_s_orig, theta_s_dict, damping, epsilon,
+                    )
+                    sgd_loss.backward()
+                    sgd_opt.step()
+                    sgd_loss_val = sgd_loss.item()
+                    if abs(prev_sgd_loss - sgd_loss_val) < tol:
+                        break
+                    prev_sgd_loss = sgd_loss_val
+                break
+
+            if verbose and (step + 1) % 5 == 0:
+                print(f"  PBRF L-BFGS step {step+1}: loss = {loss_val:.8f}")
+
+            if abs(prev_loss - loss_val) < tol:
+                if verbose:
+                    print(f"  PBRF L-BFGS converged at step {step+1}")
+                break
+            prev_loss = loss_val
+
+    else:
+        optimizer = torch.optim.SGD(model_retrained.sparse_params(), lr=lr)
+
+        prev_loss = float("inf")
+        for step in range(max_steps):
+            optimizer.zero_grad()
+            loss = compute_edge_edit_pbrf_loss(
+                model_retrained,
+                data,
+                data.edge_index,
+                edge_index_edited,
+                logits_theta_s_orig,
+                theta_s_dict,
+                damping,
+                epsilon,
+            )
+            loss.backward()
+            optimizer.step()
+
+            loss_val = loss.item()
+            if verbose and (step + 1) % 100 == 0:
+                print(f"  PBRF step {step+1}: loss = {loss_val:.8f}")
+
+            if abs(prev_loss - loss_val) < tol:
+                if verbose:
+                    print(f"  PBRF converged at step {step+1}")
+                break
+            prev_loss = loss_val
+
+    # Sync dense params if model has them
+    if hasattr(model_retrained, "_sync_dense_from_sparse"):
+        model_retrained._sync_dense_from_sparse()
 
     return model_retrained
 

@@ -43,9 +43,10 @@ Actual influence is computed by PBRF fine-tuning (Eq. 9) and evaluating metric d
 
 Key hyperparameters in `main.py`:
 - `HIDDEN_DIM=64`, `NUM_LAYERS=4`, `LR=0.1`, `WEIGHT_DECAY=1e-4`
-- `SOLVER="lissa"`, `CG_ITER=200`, `NUM_EDGES=200` (per type), `PBRF_LR=0.01`, `PBRF_STEPS=1000`
+- `SOLVER="lissa"`, `CG_ITER=200`, `NUM_EDGES=200` (per type)
+- `PBRF_OPTIMIZER="lbfgs"`, `PBRF_LR=1.0`, `PBRF_STEPS=10` (L-BFGS outer iterations)
 - Per-metric damping (paper tunes λ from {0.1, 0.01, 0.001, 0.0001}):
-  - validation_loss: λ=0.01
+  - validation_loss: λ=1.0
   - over_squashing: λ=0.1
   - dirichlet_energy: λ=0.1
 
@@ -58,12 +59,12 @@ Key hyperparameters in `main.py`:
 - End-to-end pipeline: functional, produces `figure2.png`
 - Reports both Pearson (r) and Spearman (ρ) correlations
 
-### Correlations (200 edges)
+### Correlations (200 edges, L-BFGS PBRF)
 
 | Metric | Damping | Pearson r | Spearman ρ | Paper r |
 |--------|---------|-----------|------------|---------|
-| validation_loss | 0.01 | 0.374 | 0.633 | 0.88 |
-| **over_squashing** | 0.1 | **0.914** | 0.878 | 0.94 |
-| **dirichlet_energy** | 0.1 | **0.947** | 0.865 | 0.95 |
+| **validation_loss** | 1.0 | **0.836** | **0.914** | 0.88 |
+| **over_squashing** | 0.1 | **0.925** | **0.932** | 0.94 |
+| **dirichlet_energy** | 0.1 | **0.906** | **0.949** | 0.95 |
 
-VL gap analysis: The paper tunes LR, hidden_dim, and weight_decay on a grid search. Our fixed hyperparameters produce an over-trained model (100% train acc) with ill-conditioned GGN, causing param_shift outliers that degrade VL Pearson correlation. See CLAUDE.md for full analysis.
+All three metrics achieve strong correlation with the paper's ground truth, with Spearman ρ > 0.91 across the board.
